@@ -627,6 +627,14 @@ class OutputGraph(OutputGraphCommon):
             "co_firstlineno": f_code.co_firstlineno,
         }
 
+        # Cudagraph annotation: check if the top-level function has the attribute.
+        # For inlined functions, this is set during inlining in
+        # InliningInstructionTranslator.build_inline_tracer.
+        self.cudagraph_annotation = None
+        fn = global_scope.get(f_code.co_name)
+        if fn is not None and hasattr(fn, "_cudagraph_annotation"):
+            self.cudagraph_annotation = fn._cudagraph_annotation
+
         self.region_tracker = GraphRegionTracker()
 
         # tracked_fakes says where any tensor that was wrapped to fake came
@@ -666,6 +674,7 @@ class OutputGraph(OutputGraphCommon):
             )
         self.tracing_context: TracingContext = TracingContext(fake_mode)
         self.tracing_context.traced_code.append(f_code)
+        self.tracing_context.cudagraph_annotation = self.cudagraph_annotation
         self.traced_code = self.tracing_context.traced_code
         self.dynamo_compile_id: Optional[CompileId] = (
             CompileContext.current_compile_id()
@@ -2310,6 +2319,9 @@ class OutputGraph(OutputGraphCommon):
             )
             gm.meta["dynamo_compile_id"] = self.dynamo_compile_id
             gm.meta["backend_id"] = name
+
+            if self.cudagraph_annotation is not None:
+                gm.meta["cudagraph_annotation"] = self.cudagraph_annotation
 
             graph_code_log.debug(
                 "%s",
