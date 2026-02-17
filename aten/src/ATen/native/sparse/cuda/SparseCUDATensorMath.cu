@@ -676,36 +676,22 @@ __global__ void search_end_matrix_indices_cuda_kernel(
   const TensorInfo<int64_t, int64_t> indices_1D_ti,
   const int64_t num_elements
 ){
-  const int64_t target_mat_num = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t target_mat_num = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (target_mat_num >= num_matrices) return;
 
   const auto indices_accessor = ConstStridedRandomAccessor<int64_t, int64_t, RestrictPtrTraits>(
     indices_1D_ti.data,
     indices_1D_ti.strides[0]
   );
-  mat_el_end_indices[target_mat_num] = at::cuda::detail::find_bound(indices_accessor, indices_accessor + num_elements, target_mat_num + 1) - indices_accessor;
 
-
-//  const int64_t* indices_1D = indices_1D_ti.data;
-//  const int64_t indices_1D_stride = indices_1D_ti.strides[0];
-//  int64_t start_idx = 0;
-//  int64_t end_idx = num_elements - 1;
-//
-//  while (start_idx < end_idx) {
-//    int64_t mid_idx = (start_idx + end_idx + 1) >> 1;
-//    int64_t mat_num = indices_1D[mid_idx*indices_1D_stride];
-//    if (mat_num > target_mat_num) {
-//      end_idx = mid_idx - 1;
-//    } else {
-//      start_idx = mid_idx;
-//    }
-//  }
-//
-//  if (indices_1D[start_idx*indices_1D_stride] == target_mat_num) {
-//    mat_el_end_indices[target_mat_num] = start_idx;
-//  } else {
-//    mat_el_end_indices[target_mat_num] = -1;
-//  }
+  // Points to the upper-bound of `target_mat_num`
+  const auto target_mat_num_ub_accessor = at::cuda::detail::find_bound(
+    indices_accessor,
+    indices_accessor + num_elements,
+    target_mat_num + 1
+  );
+  // Store the "end" offset of each matrix into the "batch" dim
+  mat_el_end_indices[target_mat_num] = target_mat_num_ub_accessor - indices_accessor;
 }
 
 // Search through a 1D tensor of sorted sparse matrix
