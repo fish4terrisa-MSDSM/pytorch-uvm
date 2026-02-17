@@ -777,11 +777,8 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
   Tensor values =      self_coalesced._values();
 
   Tensor indices_dim0 = indices[0];
-
-  // Need to convert dim1 and dim2 indices to 32-bit since cusparseSpMM
-  // only supports 32-bit indices
-  Tensor indices_dim1 = indices[1].to(ScalarType::Int);
-  Tensor indices_dim2 = indices[2].to(ScalarType::Int);
+  Tensor indices_dim1 = indices[1];
+  Tensor indices_dim2 = indices[2];
 
   std::vector<int64_t> mat_el_end_indices_host(num_matrices);
 
@@ -820,8 +817,8 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
     values.scalar_type(), "bmm_sparse_cuda", [&] {
       scalar_t alpha_val = alpha.to<scalar_t>();
       scalar_t beta_val = beta.to<scalar_t>();
-      uint32_t* row_indices_start_ptr = reinterpret_cast<uint32_t*>(indices_dim1.data_ptr());
-      uint32_t* col_indices_start_ptr = reinterpret_cast<uint32_t*>(indices_dim2.data_ptr());
+      int64_t* row_indices_start_ptr = reinterpret_cast<int64_t*>(indices_dim1.data_ptr());
+      int64_t* col_indices_start_ptr = reinterpret_cast<int64_t*>(indices_dim2.data_ptr());
       scalar_t* values_start_ptr = reinterpret_cast<scalar_t*>(values.data_ptr());
       scalar_t* mat2_start_ptr = reinterpret_cast<scalar_t*>(mat2_contig.data_ptr());
       scalar_t* result_start_ptr = reinterpret_cast<scalar_t*>(tmp_result.data_ptr());
@@ -836,8 +833,8 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
         int64_t sparse_nnz = mat_el_end_idx - mat_el_begin_idx;
 
         cudaDataType cuda_data_type = getTensorCudaDataType(mat2_contig);
-        uint32_t* row_indices_ptr = &row_indices_start_ptr[mat_el_begin_idx];
-        uint32_t* col_indices_ptr = &col_indices_start_ptr[mat_el_begin_idx];
+        auto* row_indices_ptr = &row_indices_start_ptr[mat_el_begin_idx];
+        auto* col_indices_ptr = &col_indices_start_ptr[mat_el_begin_idx];
         scalar_t* values_ptr = &values_start_ptr[mat_el_begin_idx];
 
         cusparseSpMatDescr_t sparse_descr;
@@ -849,7 +846,7 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
           reinterpret_cast<void*>(row_indices_ptr),
           reinterpret_cast<void*>(col_indices_ptr),
           reinterpret_cast<void*>(values_ptr),
-          CUSPARSE_INDEX_32I,
+          CUSPARSE_INDEX_64I,
           CUSPARSE_INDEX_BASE_ZERO,
           cuda_data_type
         ));
