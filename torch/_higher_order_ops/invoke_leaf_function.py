@@ -18,6 +18,36 @@ from .flat_apply import func_to_graphable
 
 _leaf_function_module_retriever: Callable[[int], Any] | None = None
 
+# Separate storage for the make_fx / _invoke_leaf_function_python path.
+# We can't use Dynamo's register_user_object because it requires a Source
+# (for bytecode generation) and adds entries to index_to_bytecode_constructor.
+# In the make_fx path we have neither a Source nor bytecode generation, so we
+# maintain our own dict keyed by negative indices to avoid collisions with
+# Dynamo's non-negative indices.
+_makefx_module_storage: dict[int, torch.nn.Module] = {}
+_makefx_next_index = 0
+
+
+def store_makefx_modules(modules: list[torch.nn.Module]) -> tuple[int, ...]:
+    """Store modules for the make_fx path and return their assigned indices.
+
+    Uses negative indices to avoid collisions with Dynamo's register_user_object
+    which uses non-negative indices.
+    """
+    global _makefx_next_index
+    indices = []
+    for mod in modules:
+        _makefx_next_index -= 1
+        _makefx_module_storage[_makefx_next_index] = mod
+        indices.append(_makefx_next_index)
+    return tuple(indices)
+
+
+def reset_makefx_module_storage() -> None:
+    global _makefx_next_index
+    _makefx_next_index = 0
+    _makefx_module_storage.clear()
+
 
 def set_leaf_function_module_retriever(retriever: Callable[[int], Any]) -> None:
     global _leaf_function_module_retriever
@@ -36,6 +66,26 @@ class LeafModuleState(NamedTuple):
     nn_module_index: int
     named_parameters: dict[str, torch.nn.Parameter]
     named_buffers: dict[str, torch.Tensor]
+
+
+def convert_modules_to_states(values: Any, module_to_index: dict[int, int]) -> Any:
+    """Replace nn.Module instances in a pytree with LeafModuleState objects.
+
+    Args:
+        values: A pytree of values that may contain nn.Module instances.
+        module_to_index: Mapping from id(module) to its integer index.
+    """
+
+    def module_to_state(val: Any) -> Any:
+        if isinstance(val, torch.nn.Module):
+            return LeafModuleState(
+                nn_module_index=module_to_index[id(val)],
+                named_parameters=dict(val.named_parameters()),
+                named_buffers=dict(val.named_buffers()),
+            )
+        return val
+
+    return pytree.tree_map(module_to_state, values)
 
 
 @dataclass
@@ -60,6 +110,15 @@ def unwrap_fn_spec(fn_spec: pytree.TreeSpec) -> Callable:
 
 
 def _retrieve_module_by_index(nn_module_index: int) -> torch.nn.Module:
+    # Check make_fx storage first (used by _invoke_leaf_function_python).
+    # Fall back to the Dynamo retriever (used by the compiled path).
+    if nn_module_index in _makefx_module_storage:
+        if nn_module_index >= 0:
+            raise RuntimeError(
+                f"Expected negative nn_module_index for non-strict trace over leaf_function, but got {nn_module_index}."
+            )
+        return _makefx_module_storage[nn_module_index]
+
     if _leaf_function_module_retriever is None:
         raise RuntimeError("Leaf function module retriever not set.")
 
@@ -181,6 +240,19 @@ def reconstruct_original_args(
         yield new_args, new_kwargs
 
 
+def wrap_impl_for_leaf_module_state(
+    impl: Callable[..., Any],
+    input_spec: pytree.TreeSpec,
+) -> Callable[..., Any]:
+    """Wrap impl so it accepts flat_args and unflattens them before calling impl."""
+
+    def wrapper(*flat_args: Any) -> Any:
+        with reconstruct_original_args(input_spec, flat_args) as (args, kwargs):
+            return impl(*args, **kwargs)
+
+    return wrapper
+
+
 def autograd_grad_with_gradient_info(
     output_infos: Sequence[GradientInfo | None],
     input_infos: Sequence[GradientInfo | None],
@@ -286,10 +358,13 @@ def _make_forward(
         ]
 
         # NB: we capture dispatch keys at creation time (during tracing), where PythonDispatcher
-        # is active, but at runtime it's not so we remove it from the effective keys.
+        # and Python are active (for __torch_dispatch__ modes), but at runtime they're not on
+        # the stack so we strip them.
         effective_keys = include_keys
         if include_keys.has(DispatchKey.PythonDispatcher):
-            effective_keys = include_keys.remove(DispatchKey.PythonDispatcher)
+            effective_keys = effective_keys.remove(DispatchKey.PythonDispatcher)
+        if effective_keys.has(DispatchKey.Python):
+            effective_keys = effective_keys.remove(DispatchKey.Python)
         with torch._C._ForceDispatchKeyGuard(effective_keys, exclude_keys):
             with torch.enable_grad():
                 outputs = fn(*inputs)
