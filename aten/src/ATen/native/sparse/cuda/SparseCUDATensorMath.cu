@@ -824,8 +824,8 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
       scalar_t* result_start_ptr = reinterpret_cast<scalar_t*>(tmp_result.data_ptr());
       for (
         int64_t cur_mat_num = 0;
-        (cur_mat_num < num_matrices);
-        cur_mat_num++
+        cur_mat_num < num_matrices;
+        ++cur_mat_num
       ) {
         int64_t mat_el_end_idx = mat_el_end_indices[cur_mat_num];
 
