@@ -744,10 +744,10 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
   int64_t dim_j = self.size(2);
   int64_t dim_k = mat2.size(2);
 
-  result.resize_({num_matrices, dim_k, dim_i});
+  result.resize_({num_matrices, dim_i, dim_k});
 
   if ((self._nnz() == 0) || (dim_j == 0) || (dim_k == 0)) {
-    result.zero_().transpose_(1, 2);
+    result.zero_();
     return result;
   }
 
@@ -760,7 +760,7 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
     tmp_result = result;
     need_copy_result = false;
   } else {
-    tmp_result = at::empty({num_matrices, dim_k, dim_i}, result.options(), at::MemoryFormat::Contiguous);
+    tmp_result = at::empty({num_matrices, dim_i, dim_k}, result.options(), at::MemoryFormat::Contiguous);
     need_copy_result = true;
   }
 
@@ -854,12 +854,12 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
         cusparseDnMatDescr_t dense_descr;
         TORCH_CUDASPARSE_CHECK(cusparseCreateDnMat(
           &dense_descr,
-          dim_k,
           dim_j,
+          dim_k,
           dim_k,
           reinterpret_cast<void*>(mat2_ptr),
           cuda_data_type,
-          CUSPARSE_ORDER_COL
+          CUSPARSE_ORDER_ROW
         ));
         scalar_t* result_ptr = &result_start_ptr[dim_i*dim_k*cur_mat_num];
         cusparseDnMatDescr_t result_descr;
@@ -867,16 +867,16 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
           &result_descr,
           dim_i,
           dim_k,
-          dim_i,
+          dim_k,
           reinterpret_cast<void*>(result_ptr),
           cuda_data_type,
-          CUSPARSE_ORDER_COL
+          CUSPARSE_ORDER_ROW
         ));
         size_t required_workspace_buffer_size = 0;
         TORCH_CUDASPARSE_CHECK(cusparseSpMM_bufferSize(
           cusparse_handle,
           CUSPARSE_OPERATION_NON_TRANSPOSE,
-          CUSPARSE_OPERATION_TRANSPOSE,
+          CUSPARSE_OPERATION_NON_TRANSPOSE,
           (void*)&alpha_val,
           sparse_descr,
           dense_descr,
@@ -894,7 +894,7 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
         TORCH_CUDASPARSE_CHECK(cusparseSpMM(
           cusparse_handle,
           CUSPARSE_OPERATION_NON_TRANSPOSE,
-          CUSPARSE_OPERATION_TRANSPOSE,
+          CUSPARSE_OPERATION_NON_TRANSPOSE,
           (void*)&alpha_val,
           sparse_descr,
           dense_descr,
@@ -914,9 +914,6 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
   if (need_copy_result) {
     result.copy_(tmp_result);
   }
-  // Need to transpose the result matrices since cusparse stores
-  // them in column-major order in memory
-  result.transpose_(1,2);
 
   return result;
 }
