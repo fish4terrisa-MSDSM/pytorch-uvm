@@ -6,6 +6,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/native/SparseTensorUtils.h>
 #include <ATen/SparseCsrTensorUtils.h>
+#include <ATen/native/StridedRandomAccessor.h>
 #include <ATen/native/sparse/SparseTensorMath.h>
 #include <ATen/native/sparse/cuda/SparseBlasLegacy.h>
 #include <ATen/native/sparse/cuda/SparseCUDAApplyUtils.cuh>
@@ -678,26 +679,33 @@ __global__ void search_end_matrix_indices_cuda_kernel(
   const int64_t target_mat_num = ((int64_t) blockIdx.x) * blockDim.x + threadIdx.x;
   if (target_mat_num >= num_matrices) return;
 
-  const int64_t* indices_1D = indices_1D_ti.data;
-  const int64_t indices_1D_stride = indices_1D_ti.strides[0];
-  int64_t start_idx = 0;
-  int64_t end_idx = num_elements - 1;
+  const auto indices_accessor = ConstStridedRandomAccessor<int64_t, int64_t, RestrictPtrTraits>(
+    indices_1D_ti.data,
+    indices_1D_ti.strides[0]
+  );
+  mat_el_end_indices[target_mat_num] = at::cuda::detail::find_bound(indices_accessor, indices_accessor + num_elements, target_mat_num + 1) - indices_accessor;
 
-  while (start_idx < end_idx) {
-    int64_t mid_idx = (start_idx + end_idx + 1) >> 1;
-    int64_t mat_num = indices_1D[mid_idx*indices_1D_stride];
-    if (mat_num > target_mat_num) {
-      end_idx = mid_idx - 1;
-    } else {
-      start_idx = mid_idx;
-    }
-  }
 
-  if (indices_1D[start_idx*indices_1D_stride] == target_mat_num) {
-    mat_el_end_indices[target_mat_num] = start_idx;
-  } else {
-    mat_el_end_indices[target_mat_num] = -1;
-  }
+//  const int64_t* indices_1D = indices_1D_ti.data;
+//  const int64_t indices_1D_stride = indices_1D_ti.strides[0];
+//  int64_t start_idx = 0;
+//  int64_t end_idx = num_elements - 1;
+//
+//  while (start_idx < end_idx) {
+//    int64_t mid_idx = (start_idx + end_idx + 1) >> 1;
+//    int64_t mat_num = indices_1D[mid_idx*indices_1D_stride];
+//    if (mat_num > target_mat_num) {
+//      end_idx = mid_idx - 1;
+//    } else {
+//      start_idx = mid_idx;
+//    }
+//  }
+//
+//  if (indices_1D[start_idx*indices_1D_stride] == target_mat_num) {
+//    mat_el_end_indices[target_mat_num] = start_idx;
+//  } else {
+//    mat_el_end_indices[target_mat_num] = -1;
+//  }
 }
 
 // Search through a 1D tensor of sorted sparse matrix
@@ -708,8 +716,8 @@ void search_end_matrix_indices(int64_t* mat_el_end_indices, int64_t num_matrices
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(curDevice);
 
   auto indices_1D_ti = getTensorInfo<int64_t, int64_t>(indices_1D);
-  int64_t grid_size = (num_matrices / 64)+1;
   int64_t block_size = 64;
+  int64_t grid_size = (num_matrices + block_size - 1) / block_size;
   int64_t num_elements = indices_1D.size(0);
 
   search_end_matrix_indices_cuda_kernel<<<grid_size, block_size, 0, stream>>>(
@@ -719,8 +727,6 @@ void search_end_matrix_indices(int64_t* mat_el_end_indices, int64_t num_matrices
     num_elements
   );
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-
-  cudaDeviceSynchronize();
 }
 
 cudaDataType getTensorCudaDataType(Tensor self) {
@@ -840,91 +846,85 @@ Tensor& bmm_out_sparse_cuda(const SparseTensor& self, const Tensor& mat2, Tensor
       ) {
         int64_t mat_el_end_idx = mat_el_end_indices[cur_mat_num];
 
-        if (mat_el_end_idx != -1) {
-          mat_el_end_idx++;
+        // Create tensors to view just the current set of matrices
+        int64_t sparse_nnz = mat_el_end_idx - mat_el_begin_idx;
 
-          // Create tensors to view just the current set of matrices
-          int64_t sparse_nnz = mat_el_end_idx - mat_el_begin_idx;
+        cudaDataType cuda_data_type = getTensorCudaDataType(mat2_contig);
+        uint32_t* row_indices_ptr = &row_indices_start_ptr[mat_el_begin_idx];
+        uint32_t* col_indices_ptr = &col_indices_start_ptr[mat_el_begin_idx];
+        scalar_t* values_ptr = &values_start_ptr[mat_el_begin_idx];
 
-          cudaDataType cuda_data_type = getTensorCudaDataType(mat2_contig);
-          uint32_t* row_indices_ptr = &row_indices_start_ptr[mat_el_begin_idx];
-          uint32_t* col_indices_ptr = &col_indices_start_ptr[mat_el_begin_idx];
-          scalar_t* values_ptr = &values_start_ptr[mat_el_begin_idx];
-
-          cusparseSpMatDescr_t sparse_descr;
-          TORCH_CUDASPARSE_CHECK(cusparseCreateCoo(
-            &sparse_descr,
-            dim_i,
-            dim_j,
-            sparse_nnz,
-            reinterpret_cast<void*>(row_indices_ptr),
-            reinterpret_cast<void*>(col_indices_ptr),
-            reinterpret_cast<void*>(values_ptr),
-            CUSPARSE_INDEX_32I,
-            CUSPARSE_INDEX_BASE_ZERO,
-            cuda_data_type
-          ));
-          scalar_t* mat2_ptr = &mat2_start_ptr[dim_k*dim_j*cur_mat_num];
-          cusparseDnMatDescr_t dense_descr;
-          TORCH_CUDASPARSE_CHECK(cusparseCreateDnMat(
-            &dense_descr,
-            dim_k,
-            dim_j,
-            dim_k,
-            reinterpret_cast<void*>(mat2_ptr),
-            cuda_data_type,
-            CUSPARSE_ORDER_COL
-          ));
-          scalar_t* result_ptr = &result_start_ptr[dim_i*dim_k*cur_mat_num];
-          cusparseDnMatDescr_t result_descr;
-          TORCH_CUDASPARSE_CHECK(cusparseCreateDnMat(
-            &result_descr,
-            dim_i,
-            dim_k,
-            dim_i,
-            reinterpret_cast<void*>(result_ptr),
-            cuda_data_type,
-            CUSPARSE_ORDER_COL
-          ));
-          size_t required_workspace_buffer_size = 0;
-          TORCH_CUDASPARSE_CHECK(cusparseSpMM_bufferSize(
-            cusparse_handle,
-            CUSPARSE_OPERATION_NON_TRANSPOSE,
-            CUSPARSE_OPERATION_TRANSPOSE,
-            (void*)&alpha_val,
-            sparse_descr,
-            dense_descr,
-            (void*)&beta_val,
-            result_descr,
-            cuda_data_type,
-            mm_alg,
-            &required_workspace_buffer_size
-          ));
-          if (required_workspace_buffer_size > workspace_buffer_size) {
-            workspace_buffer_size = required_workspace_buffer_size;
-            dataPtr = allocator.allocate(workspace_buffer_size);
-            workspace_buffer = dataPtr.get();
-          }
-          TORCH_CUDASPARSE_CHECK(cusparseSpMM(
-            cusparse_handle,
-            CUSPARSE_OPERATION_NON_TRANSPOSE,
-            CUSPARSE_OPERATION_TRANSPOSE,
-            (void*)&alpha_val,
-            sparse_descr,
-            dense_descr,
-            (void*)&beta_val,
-            result_descr,
-            cuda_data_type,
-            mm_alg,
-            workspace_buffer
-          ));
-          TORCH_CUDASPARSE_CHECK(cusparseDestroySpMat(sparse_descr));
-          TORCH_CUDASPARSE_CHECK(cusparseDestroyDnMat(dense_descr));
-          TORCH_CUDASPARSE_CHECK(cusparseDestroyDnMat(result_descr));
-          mat_el_begin_idx = mat_el_end_idx;
-        } else {
-          tmp_result[cur_mat_num].zero_();
+        cusparseSpMatDescr_t sparse_descr;
+        TORCH_CUDASPARSE_CHECK(cusparseCreateCoo(
+          &sparse_descr,
+          dim_i,
+          dim_j,
+          sparse_nnz,
+          reinterpret_cast<void*>(row_indices_ptr),
+          reinterpret_cast<void*>(col_indices_ptr),
+          reinterpret_cast<void*>(values_ptr),
+          CUSPARSE_INDEX_32I,
+          CUSPARSE_INDEX_BASE_ZERO,
+          cuda_data_type
+        ));
+        scalar_t* mat2_ptr = &mat2_start_ptr[dim_k*dim_j*cur_mat_num];
+        cusparseDnMatDescr_t dense_descr;
+        TORCH_CUDASPARSE_CHECK(cusparseCreateDnMat(
+          &dense_descr,
+          dim_k,
+          dim_j,
+          dim_k,
+          reinterpret_cast<void*>(mat2_ptr),
+          cuda_data_type,
+          CUSPARSE_ORDER_COL
+        ));
+        scalar_t* result_ptr = &result_start_ptr[dim_i*dim_k*cur_mat_num];
+        cusparseDnMatDescr_t result_descr;
+        TORCH_CUDASPARSE_CHECK(cusparseCreateDnMat(
+          &result_descr,
+          dim_i,
+          dim_k,
+          dim_i,
+          reinterpret_cast<void*>(result_ptr),
+          cuda_data_type,
+          CUSPARSE_ORDER_COL
+        ));
+        size_t required_workspace_buffer_size = 0;
+        TORCH_CUDASPARSE_CHECK(cusparseSpMM_bufferSize(
+          cusparse_handle,
+          CUSPARSE_OPERATION_NON_TRANSPOSE,
+          CUSPARSE_OPERATION_TRANSPOSE,
+          (void*)&alpha_val,
+          sparse_descr,
+          dense_descr,
+          (void*)&beta_val,
+          result_descr,
+          cuda_data_type,
+          mm_alg,
+          &required_workspace_buffer_size
+        ));
+        if (required_workspace_buffer_size > workspace_buffer_size) {
+          workspace_buffer_size = required_workspace_buffer_size;
+          dataPtr = allocator.allocate(workspace_buffer_size);
+          workspace_buffer = dataPtr.get();
         }
+        TORCH_CUDASPARSE_CHECK(cusparseSpMM(
+          cusparse_handle,
+          CUSPARSE_OPERATION_NON_TRANSPOSE,
+          CUSPARSE_OPERATION_TRANSPOSE,
+          (void*)&alpha_val,
+          sparse_descr,
+          dense_descr,
+          (void*)&beta_val,
+          result_descr,
+          cuda_data_type,
+          mm_alg,
+          workspace_buffer
+        ));
+        TORCH_CUDASPARSE_CHECK(cusparseDestroySpMat(sparse_descr));
+        TORCH_CUDASPARSE_CHECK(cusparseDestroyDnMat(dense_descr));
+        TORCH_CUDASPARSE_CHECK(cusparseDestroyDnMat(result_descr));
+        mat_el_begin_idx = mat_el_end_idx;
       }
     }
   );
