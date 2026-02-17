@@ -361,7 +361,7 @@ def _make_forward(
         # and Python are active (for __torch_dispatch__ modes), but at runtime they're not on
         # the stack so we strip them.
         effective_keys = include_keys
-        if include_keys.has(DispatchKey.PythonDispatcher):
+        if effective_keys.has(DispatchKey.PythonDispatcher):
             effective_keys = effective_keys.remove(DispatchKey.PythonDispatcher)
         if effective_keys.has(DispatchKey.Python):
             effective_keys = effective_keys.remove(DispatchKey.Python)
@@ -450,6 +450,13 @@ class InvokeLeafFunction(HigherOrderOperator):
 
 
 invoke_leaf_function = InvokeLeafFunction()
+
+# Leaf functions are opaque and may have side effects (logging, printing, etc.).
+# Mark as side-effectful to prevent dead code elimination when outputs are unused.
+from torch.fx.node import has_side_effect
+
+
+has_side_effect(invoke_leaf_function)
 
 
 # NOTE: [Autograd support for invoke_leaf_function]
