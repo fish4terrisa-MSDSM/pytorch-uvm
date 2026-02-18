@@ -1042,12 +1042,22 @@ PrivatePoolState::PrivatePoolState(
   }
 }
 
+cudaError_t cudaMallocMaybeUsingUvm(void** p, size_t size) {
+  if (CUDAAllocatorConfig::use_uvm()) {
+    return cudaMallocManaged(p, size);
+  } else {
+    return cudaMalloc(p, size);
+  }
+}
+
+
+
 cudaError_t allocPrimitive(void** ptr, size_t size, AllocParams& p) {
   if (p.pool->owner_PrivatePool && p.pool->owner_PrivatePool->allocator()) {
     *ptr = p.pool->owner_PrivatePool->allocator()->raw_alloc(size);
     return *ptr ? cudaSuccess : cudaErrorMemoryAllocation;
   } else {
-    return C10_CUDA_ERROR_HANDLED(cudaMalloc(ptr, size));
+    return C10_CUDA_ERROR_HANDLED(cudaMallocMaybeUsingUvm(ptr, size));
   }
 }
 
@@ -1454,6 +1464,34 @@ class DeviceCachingAllocator {
               AcceleratorAllocatorConfig::garbage_collection_threshold() >
                   0.0)) {
         garbage_collect_cached_blocks(context);
+      }
+
+      // Usually we only trigger memory reclaimation on allocation failure.
+      // However, if UVM is in use, we never get allocation failure from CUDA,
+      // so we have to free memory proactively.
+      if (CUDAAllocatorConfig::use_uvm()) {
+        [[maybe_unused]] size_t device_free = 0;
+        size_t device_total = 0;
+        C10_CUDA_CHECK(cudaMemGetInfo(&device_free, &device_total));
+
+        auto allocated_bytes =
+            stats.allocated_bytes[static_cast<size_t>(StatType::AGGREGATE)]
+                .current;
+        auto reserved_bytes =
+            stats.reserved_bytes[static_cast<size_t>(StatType::AGGREGATE)]
+                .current;
+        // We only proactively reclaim memory if we've used up all device
+        // memories. This is consistent with the default behavior when UVM is
+        // not used.
+        if (reserved_bytes > static_cast<int64_t>(device_total) &&
+            // Try reclaiming via the lighter way first, and if it fails..
+            !release_available_cached_blocks(params) &&
+            // ... try the harder way. Here we allow a maximum of 1.33x
+            // over-subscription before doing the "hard" reclaimation.
+            reserved_bytes > allocated_bytes * 4 / 3 &&
+            C10_LIKELY(captures_underway == 0)) {
+          release_cached_blocks(context);
+        }
       }
 
       // Attempt allocate
@@ -3863,7 +3901,7 @@ static void* uncached_allocate(size_t size) {
   void* devPtr = nullptr;
   // Deliberately don't use cudaMallocMaybeCapturing here, to force an error
   // if someone tries to use forceUncachedAllocator while capturing.
-  C10_CUDA_CHECK(cudaMalloc(&devPtr, size));
+  C10_CUDA_CHECK(cudaMallocMaybeUsingUvm(&devPtr, size));
   const c10::impl::PyInterpreter* interp = c10::impl::GPUTrace::get_trace();
   if (C10_UNLIKELY(interp)) {
     (*interp)->trace_gpu_memory_allocation(

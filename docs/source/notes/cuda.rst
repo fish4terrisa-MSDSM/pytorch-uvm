@@ -608,6 +608,10 @@ Available options:
   allocation time of pinned memory. A good value for this option is 8 based on
   benchmarking results.
 
+* `use_uvm` enables CUDA Unified Memory when set to `True`. Using CUDA Unified
+  Memory reduces OOM possibility, but may slow down the training. We advise you
+  profile before enabling it.
+
 * `pinned_use_background_threads` option is a boolean flag to enable background thread
   for processing events. This avoids any slow path associated with querying/processing of
   events in the fast allocation path. This feature is disabled by default.

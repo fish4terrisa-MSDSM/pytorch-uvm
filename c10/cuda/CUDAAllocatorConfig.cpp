@@ -78,6 +78,10 @@ void CUDAAllocatorConfig::parseArgs(const std::string& env) {
     const auto& key = tokenizer[i];
     if (key == "backend") {
       i = parseAllocatorConfig(tokenizer, i, used_cudaMallocAsync);
+    } else if (config[i] == "use_uvm") {
+      used_native_specific_option = true;
+      tokenizer.checkToken(++i, ":");
+      m_use_uvm = tokenizer.toBool(++i);
     } else if (
         // ROCm build's hipify step will change "cuda" to "hip", but for ease of
         // use, accept both. We must break up the string to prevent hipify here.

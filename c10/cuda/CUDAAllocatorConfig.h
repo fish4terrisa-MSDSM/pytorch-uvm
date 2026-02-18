@@ -53,6 +53,10 @@ class C10_CUDA_API CUDAAllocatorConfig {
     instance().m_expandable_segments_handle_type = handle_type;
   }
 
+  static bool use_uvm() {
+    return instance().m_use_uvm;
+  }
+
   static bool release_lock_on_cudamalloc() {
     return instance().m_release_lock_on_cudamalloc;
   }
@@ -195,6 +199,7 @@ class C10_CUDA_API CUDAAllocatorConfig {
       {Expandable_Segments_Handle_Type::POSIX_FD};
 #endif
   std::atomic<bool> m_release_lock_on_cudamalloc{false};
+  std::atomic<bool> m_use_uvm{true};
   std::atomic<bool> m_pinned_use_cuda_host_register{false};
   std::atomic<bool> m_graph_capture_record_stream_reuse{false};
   std::atomic<double> m_per_process_memory_fraction{1.0};

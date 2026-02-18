@@ -317,6 +317,14 @@ if [[ "${TEST_CONFIG}" == "legacy_nvidia_driver" ]]; then
   export USE_LEGACY_DRIVER=1
 fi
 
+test_python_cuda_uvm() {
+  export PYTORCH_CUDA_ALLOC_CONF='use_uvm:True'
+  time python test/test_cuda.py
+  unset PYTORCH_CUDA_ALLOC_CONF
+
+  assert_git_not_dirty
+}
+
 test_python_legacy_jit() {
   time python test/run_test.py --include test_jit_legacy test_jit_fuser_legacy --verbose
   assert_git_not_dirty
@@ -2051,6 +2059,7 @@ else
   install_torchvision
   install_monkeytype
   test_python
+  test_python_cuda_uvm
   test_aten
   test_vec256
   test_libtorch

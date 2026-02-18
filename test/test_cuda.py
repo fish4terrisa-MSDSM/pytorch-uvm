@@ -116,6 +116,7 @@ skipIfNoTorchVision = unittest.skipIf(not HAS_TORCHVISION, "no torchvision")
 TEST_CUDAMALLOCASYNC = TEST_CUDA and (
     torch.cuda.get_allocator_backend() == "cudaMallocAsync"
 )
+TEST_CUDA_UVM = TEST_CUDA and ('use_uvm:True' in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ''))
 TEST_LARGE_TENSOR = TEST_CUDA
 TEST_MEDIUM_TENSOR = TEST_CUDA
 TEST_BF16 = False
@@ -432,9 +433,22 @@ print(t.is_pinned())
         tensor.fill_(1)
         self.assertTrue((tensor == 1).all())
 
+    @unittest.skipIf(not TEST_CUDA_UVM, "VRAM over-subscription is possible with UVM only")
+    def test_vram_over_subscription(self):
+        torch.cuda.empty_cache()
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        size = int(total_memory * 1.5)  # Over-subscription
+        a = torch.empty(size , dtype=torch.int8, device='cuda')
+        self.assertEqual(a.numel() * a.element_size(), size)
+        del a
+        # We used a lot of memory here, clean up so we don't affect other tests too much
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
     @unittest.skipIf(
         TEST_CUDAMALLOCASYNC or IS_JETSON, "Segmentation fault (core dumped)"
     )
+    @unittest.skipIf(TEST_CUDA_UVM, "UVM allows VRAM over-subscription so no retry would occur")
     @serialTest()
     def test_out_of_memory_retry(self):
         torch.cuda.empty_cache()
@@ -459,6 +473,7 @@ print(t.is_pinned())
     @unittest.skipIf(
         IS_JETSON, "oom reporting has issues on jetson igx due to partial nvml support"
     )
+    @unittest.skipIf(TEST_CUDA_UVM, "With UVM enabled, max_memory_reserved can be greater than total memory")
     def test_set_per_process_memory_fraction(self):
         orig = torch.cuda.get_per_process_memory_fraction(0)
         torch.cuda.reset_peak_memory_stats(0)
@@ -1304,6 +1319,7 @@ print(t.is_pinned())
         self.assertNotEqual(t.data_ptr(), ptr, msg="allocation reused too soon")
         self.assertEqual(list(gpu_tensor), [1])
 
+    @unittest.skipIf(TEST_CUDA_UVM, "It's hard to trigger OOM with UVM enabled")
     def test_caching_allocator_record_stream_oom(self):
         """allocations delayed by a record_stream call should still be freed on
         an out-of-memory in cuda_malloc_retry. see issue #19219"""
@@ -2436,6 +2452,7 @@ exit(2)
     @unittest.skipIf(
         IS_JETSON, "oom reporting has issues on jetson igx due to partial nvml support"
     )
+    @unittest.skipIf(TEST_CUDA_UVM, "It's hard to trigger OOM with UVM enabled")
     def test_graph_capture_oom(self):
         oom_regex = (
             "would exceed allowed memory" if TEST_CUDAMALLOCASYNC else "out of memory"
@@ -4893,6 +4910,7 @@ print(value, end="")
         IS_JETSON, "oom reporting has issues on jetson igx due to partial nvml support"
     )
     @parametrize("max_split_size_mb_setting", [False, True])
+    @unittest.skipIf(TEST_CUDA_UVM, "It's hard to trigger OOM with UVM enabled")
     def test_raises_oom(self, max_split_size_mb_setting):
         if max_split_size_mb_setting:
             # CudaCachingAllocator does early return when searching available blocks
@@ -4963,6 +4981,7 @@ print(value, end="")
     @unittest.skipIf(
         IS_JETSON, "oom reporting has issues on jetson igx due to partial nvml support"
     )
+    @unittest.skipIf(TEST_CUDA_UVM, "It's hard to trigger OOM with UVM enabled")
     def test_notifies_oom(self):
         x = False
 
