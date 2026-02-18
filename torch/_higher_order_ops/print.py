@@ -103,6 +103,26 @@ print.fallthrough(torch._C.DispatchKey.AutogradCPU)
 print.fallthrough(torch._C.DispatchKey.AutogradCUDA)
 
 
+def _register_dtensor_impl() -> None:
+    from torch.distributed.tensor import DTensor, Replicate
+
+    @print.py_impl(DTensor)  # pyrefly: ignore [missing-attribute]
+    # pyre-ignore
+    def print_dtensor(format_str: str, *args: object, **kwargs: object) -> None:
+        import torch.distributed as dist
+
+        def _unwrap_dtensor(val: object) -> object:
+            if isinstance(val, DTensor):
+                replicate_placements = [Replicate()] * len(val.placements)
+                return val.redistribute(placements=replicate_placements).to_local()
+            return val
+
+        local_args = pytree.tree_map(_unwrap_dtensor, args)
+        local_kwargs = pytree.tree_map(_unwrap_dtensor, kwargs)
+        if dist.get_rank() == 0:
+            print(format_str, *local_args, **local_kwargs)
+
+
 @print.py_functionalize_impl
 def print_func(ctx, format_str: str, *args: object, **kwargs: object):
     from torch._higher_order_ops.effects import handle_effects
