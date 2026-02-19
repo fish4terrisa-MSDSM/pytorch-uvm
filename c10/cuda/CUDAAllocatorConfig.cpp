@@ -78,7 +78,7 @@ void CUDAAllocatorConfig::parseArgs(const std::string& env) {
     const auto& key = tokenizer[i];
     if (key == "backend") {
       i = parseAllocatorConfig(tokenizer, i, used_cudaMallocAsync);
-    } else if (config[i] == "use_uvm") {
+    } else if (key == "use_uvm") {
       used_native_specific_option = true;
       tokenizer.checkToken(++i, ":");
       m_use_uvm = tokenizer.toBool(++i);
