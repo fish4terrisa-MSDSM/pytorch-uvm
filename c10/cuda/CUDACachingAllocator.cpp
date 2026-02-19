@@ -1485,12 +1485,12 @@ class DeviceCachingAllocator {
         // not used.
         if (reserved_bytes > static_cast<int64_t>(device_total) &&
             // Try reclaiming via the lighter way first, and if it fails..
-            !release_available_cached_blocks(params) &&
+            !release_available_cached_blocks(params, context) &&
             // ... try the harder way. Here we allow a maximum of 1.33x
             // over-subscription before doing the "hard" reclaimation.
             reserved_bytes > allocated_bytes * 4 / 3 &&
-            C10_LIKELY(captures_underway == 0)) {
-          release_cached_blocks(context);
+            C10_LIKELY(captures_underway.empty())) {
+          release_cached_blocks(context, {0, 0});
         }
       }
 
